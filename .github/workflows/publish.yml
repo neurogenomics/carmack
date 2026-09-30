@@ -8,6 +8,10 @@
 # works from the tested run's head_sha and head_branch instead (head_branch holds the
 # tag name for a tag push).
 #
+# The same goes for the commit page: GitHub attaches a workflow_run run's check to main's
+# tip and leaves it out of the commit's tick or cross, so the job posts a "Publish image"
+# commit status on the tested commit itself, pending at the start and final at the end.
+#
 # Tags:
 #   sha-<7>        every push to main and every release; never moved, so it is what a
 #                  consumer pins, together with the digest in the run summary
@@ -53,7 +57,17 @@ jobs:
     permissions:
       contents: read
       packages: write
+      statuses: write
     steps:
+      - name: Mark the publish pending on the tested commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh api "repos/${GITHUB_REPOSITORY}/statuses/${SOURCE_SHA}" \
+              -f state=pending -f context="Publish image" \
+              -f description="Pushing the runtime image" -f target_url="${RUN_URL}"
+
       - uses: actions/checkout@v4
         with:
           ref: ${{ env.SOURCE_SHA }}
@@ -134,3 +148,21 @@ jobs:
             echo "Tags:"
             echo "${TAGS}" | sed 's/^/- `/;s/$/`/'
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # always(), so a failed or cancelled push turns the pending status into a cross
+      # rather than leaving it pending for good.
+      - name: Report the publish on the tested commit
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          JOB_STATUS: ${{ job.status }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          case "${JOB_STATUS}" in
+              success) state=success description="Image pushed" ;;
+              failure) state=failure description="Image push failed" ;;
+              *) state=error description="Publish ${JOB_STATUS}" ;;
+          esac
+          gh api "repos/${GITHUB_REPOSITORY}/statuses/${SOURCE_SHA}" \
+              -f state="${state}" -f context="Publish image" \
+              -f description="${description}" -f target_url="${RUN_URL}"
