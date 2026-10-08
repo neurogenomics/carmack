@@ -26,6 +26,9 @@ component really is. The rare cost, accepted deliberately rather than chased for
 precision, is that one quality position inside that fixed window can really belong to
 the neighbouring component - the same approximation CellRanger's CB/CY tag convention
 already makes.
+
+The writer also describes the layout of the barcodes record it synthesizes, so a tool
+reading that FASTQ can find the cell barcode and the UMI without knowing the chemistry.
 """
 
 from carmack.chemistry.annotation import parse_span, position_key
@@ -73,6 +76,41 @@ class ScrnaWriter:
         self.barcode_components = tuple(
             chemistry.read_structure.get_components_by_type(ReadComponentType.BARCODE)
         )
+
+    def layout(self) -> dict[str, object]:
+        """Describe the barcodes record ``write_read`` emits, as a plain JSON-ready dict.
+
+        Starts are 0-based offsets into the record itself, not into R1, and every value is
+        a plain string or integer, so a consumer needs nothing from this package to read
+        it. It walks the same cached barcode components and UMI, in the same order and at
+        the same declared lengths, that ``write_read`` builds the record from.
+
+        Returns:
+            The chemistry's name, the record's total length, the cell barcode's and the
+            UMI's spans within the record, and each component's name, type, start and
+            length in record order.
+        """
+        components: list[dict[str, object]] = []
+        offset = 0
+        for comp in (*self.barcode_components, self.umi):
+            components.append(
+                {
+                    "name": comp.name,
+                    "type": comp.type.value,
+                    "start": offset,
+                    "length": comp.length,
+                }
+            )
+            offset += comp.length
+
+        cell_barcode_length = offset - self.umi.length
+        return {
+            "chemistry": self.chemistry.name,
+            "length": offset,
+            "cell_barcode": {"start": 0, "length": cell_barcode_length},
+            "umi": {"start": cell_barcode_length, "length": self.umi.length},
+            "components": components,
+        }
 
     def read_value(self, ann: ReadAnnotation, key: str) -> str:
         """Read one component's recorded value off an annotation, guarding a missing tag.

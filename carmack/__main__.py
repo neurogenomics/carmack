@@ -255,7 +255,8 @@ def prepare_reads(r1_annotated_fastq, r2_fastq, chemistry, output_dir, prefix, c
     read is written exactly once, to exactly one of the two arms, unless its trim point
     has reached the end of the read - a cluster that stopped sequencing before the insert
     leaves nothing to write, so the read is written to no arm and counted as
-    insert_not_sequenced in the run's report instead.
+    insert_not_sequenced in the run's report instead. The scRNA arm's barcodes FASTQ comes
+    with a <prefix>.none.barcodes.json describing its cell-barcode and UMI layout.
     """
 
     log.info("Preparing reads from annotated FASTQ file...")

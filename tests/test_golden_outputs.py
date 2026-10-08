@@ -791,7 +791,8 @@ class TargetGoldenOutputChecks:
 
 class PrepareReadsGoldenOutputChecks:
     """
-    Per-file golden checks for the six prepare-reads outputs.
+    Per-file golden checks for the six prepare-reads outputs, plus a structural check of the
+    layout sidecar that describes the synthesized barcodes file.
 
     The shipped custom_seq whitelist carries exactly one target (``CUSTOM_SEQ_TGIDX_VALUE``),
     so this class checks that one bucket's R1/R2 pair by name rather than looping over the
@@ -828,6 +829,25 @@ class PrepareReadsGoldenOutputChecks:
         assert_gzip_output_matches_golden(
             golden_run, "none.barcodes.fastq.gz", "none.barcodes.fastq"
         )
+
+    def test_unmatched_barcodes_layout_fits_every_barcodes_record(
+        self, golden_run: GoldenRun
+    ) -> None:
+        """
+        Test that the barcodes layout sidecar's length fits every record written beside it.
+
+        Args:
+            golden_run: The extraction run under test.
+        """
+        layout = json.loads(golden_run.produced("none.barcodes.json").read_text())
+
+        lines = read_gzip_text(golden_run.produced("none.barcodes.fastq.gz")).splitlines()
+        sequences = lines[FASTQ_SEQUENCE_LINE::FASTQ_RECORD_LINES]
+        qualities = lines[FASTQ_QUALITY_LINE::FASTQ_RECORD_LINES]
+
+        assert_that(sequences).is_not_empty()
+        assert_that({len(seq) for seq in sequences}).is_equal_to({layout["length"]})
+        assert_that({len(qual) for qual in qualities}).is_equal_to({layout["length"]})
 
     def test_matched_bucket_r1_matches_golden(self, golden_run: GoldenRun) -> None:
         """
