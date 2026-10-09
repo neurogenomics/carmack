@@ -7,6 +7,11 @@ Start with the top-level [`README.md`](../README.md) for installation and CLI us
 - [Development](development.md): setup, git hooks, code style, running the tests, and the
   golden output baseline.
 
+## Outputs
+
+- [prepare-reads outputs](prepare-reads-outputs.md): every file `prepare-reads` writes,
+  and the layout of the scRNA barcodes record.
+
 ## Design notes
 
 Why an internal works the way it does, one topic per file.

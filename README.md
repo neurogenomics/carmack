@@ -75,8 +75,8 @@ Commands that run on a worker pool take `-n`/`--cpu_count` to set its size.
 
 ## Documentation
 
-See [`docs/`](docs/README.md) for the contributor guide and the design notes behind
-individual stages.
+See [`docs/`](docs/README.md) for the contributor guide, output reference, and the design
+notes behind individual stages.
 
 ## License
 

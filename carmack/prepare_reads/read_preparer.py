@@ -25,6 +25,7 @@ only once that same batch's result has been drained, so the two halves can never
 out of step even though only one of them ever crosses into a worker.
 """
 
+import json
 from collections import deque
 from collections.abc import Iterable, Iterator
 from concurrent.futures import ProcessPoolExecutor
@@ -318,7 +319,10 @@ class ReadPreparer:
         a machine nothing it can act on directly and the output directory tells it
         nothing at all: every whitelisted target's bucket is opened below, so an absent
         target still leaves a valid, empty bucket behind for a consumer to trip over,
-        and the counts are what that consumer sizes its fan-out from.
+        and the counts are what that consumer sizes its fan-out from. A
+        ``none.barcodes.json`` layout sidecar is always written too, so a consumer can
+        locate the cell barcode and the UMI in the barcodes record without re-deriving
+        the chemistry.
 
         The output side opens a dynamic number of gzip writers: three fixed files plus
         one (R1, R2) pair per entry in the chemistry's target index whitelist, all of
@@ -379,6 +383,7 @@ class ReadPreparer:
         none_r1_path = output_path / f"{prefix}.none.r1.fastq.gz"
         none_r2_path = output_path / f"{prefix}.none.r2.fastq.gz"
         none_barcodes_path = output_path / f"{prefix}.none.barcodes.fastq.gz"
+        none_barcodes_layout_path = output_path / f"{prefix}.none.barcodes.json"
 
         with ExitStack() as stack:
             none_r1_stream = stack.enter_context(GzipFile(str(none_r1_path)).open_write_stream())
@@ -477,6 +482,10 @@ class ReadPreparer:
         # did not get far enough to say", and a missing file cannot say the first.
         with (output_path / f"{prefix}.detected_targets.txt").open("w") as detected_file:
             detected_file.write(stats.get_detected_targets())
+
+        none_barcodes_layout_path.write_text(
+            json.dumps(self.scrna_writer.layout(), indent=2) + "\n"
+        )
 
         # Neither payload is conditional, unlike the sibling stages' edit-distance and
         # anchor-run charts, so both always reach the writer and both always render.

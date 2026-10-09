@@ -1471,6 +1471,11 @@ def none_barcodes_path(directory: Path, prefix: str) -> Path:
     return directory / f"{prefix}.none.barcodes.fastq.gz"
 
 
+def none_barcodes_layout_path(directory: Path, prefix: str) -> Path:
+    """Return the path of the layout sidecar describing the barcodes file for `prefix`."""
+    return directory / f"{prefix}.none.barcodes.json"
+
+
 def target_r1_path(directory: Path, prefix: str, tgidx: str) -> Path:
     """Return the path of one matched target bucket's R1 file for `prefix`."""
     return directory / f"{prefix}.{tgidx}.r1.fastq.gz"
@@ -2300,6 +2305,7 @@ class TestReadPreparerOutputs:
                     f"{OUT_PREFIX}.none.r1.fastq.gz",
                     f"{OUT_PREFIX}.none.r2.fastq.gz",
                     f"{OUT_PREFIX}.none.barcodes.fastq.gz",
+                    f"{OUT_PREFIX}.none.barcodes.json",
                     f"{OUT_PREFIX}.prepare_stats.txt",
                     f"{OUT_PREFIX}.detected_targets.txt",
                     f"{OUT_PREFIX}.prepare_general_stats_mqc.json",
@@ -2446,6 +2452,7 @@ class TestReadPreparerOutputs:
         assert_that(none_r1_path(tmp_path, expected_prefix).exists()).is_true()
         assert_that(none_r2_path(tmp_path, expected_prefix).exists()).is_true()
         assert_that(none_barcodes_path(tmp_path, expected_prefix).exists()).is_true()
+        assert_that(none_barcodes_layout_path(tmp_path, expected_prefix).exists()).is_true()
         assert_that(prepare_stats_path(tmp_path, expected_prefix).exists()).is_true()
         assert_that(detected_targets_path(tmp_path, expected_prefix).exists()).is_true()
 
@@ -2476,6 +2483,12 @@ class TestReadPreparerOutputs:
         # received a read" from "the stage never got far enough to say".
         assert_that(detected_targets_path(tmp_path, OUT_PREFIX).exists()).is_true()
         assert_that(detected_targets_path(tmp_path, OUT_PREFIX).read_text()).is_equal_to("")
+
+        # The layout describes the record shape the chemistry would write, which
+        # does not depend on any read having been written in that shape.
+        assert_that(none_barcodes_layout_path(tmp_path, OUT_PREFIX).read_text()).is_equal_to(
+            json.dumps(preparer.scrna_writer.layout(), indent=2) + "\n"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -3360,6 +3373,7 @@ class TestReadPreparerPoolWiring:
         assert_that(none_r1_path(tmp_path, OUT_PREFIX).exists()).is_false()
         assert_that(none_r2_path(tmp_path, OUT_PREFIX).exists()).is_false()
         assert_that(none_barcodes_path(tmp_path, OUT_PREFIX).exists()).is_false()
+        assert_that(none_barcodes_layout_path(tmp_path, OUT_PREFIX).exists()).is_false()
         assert_that(prepare_stats_path(tmp_path, OUT_PREFIX).exists()).is_false()
         for target in TWO_TARGET_WHITELIST:
             assert_that(target_r1_path(tmp_path, OUT_PREFIX, target).exists()).is_false()
@@ -3569,13 +3583,14 @@ REAL_POOL_OUTPUTS = (
     f"{REAL_POOL_PREFIX}.none.r1.fastq.gz",
     f"{REAL_POOL_PREFIX}.none.r2.fastq.gz",
     f"{REAL_POOL_PREFIX}.none.barcodes.fastq.gz",
+    f"{REAL_POOL_PREFIX}.none.barcodes.json",
     f"{REAL_POOL_PREFIX}.{TGIDX_VALUE}.r1.fastq.gz",
     f"{REAL_POOL_PREFIX}.{TGIDX_VALUE}.r2.fastq.gz",
     f"{REAL_POOL_PREFIX}.prepare_stats.txt",
     f"{REAL_POOL_PREFIX}.detected_targets.txt",
 )
 
-# The gzip FASTQ outputs among REAL_POOL_OUTPUTS, excluding the two plain-text
+# The gzip FASTQ outputs among REAL_POOL_OUTPUTS, excluding the three plain-text
 # files written after the run -- the five streamed writers whose pipe lifecycle
 # this class exercises.
 REAL_POOL_GZIP_OUTPUTS = tuple(name for name in REAL_POOL_OUTPUTS if name.endswith(".fastq.gz"))

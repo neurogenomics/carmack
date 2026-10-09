@@ -59,11 +59,15 @@ disagrees with the one it would have derived - an assertion no implementation th
 recomputes internally can pass. Those same tests pin that the barcodes record does not
 move with the cut at all, because its quality windows are sliced in the original,
 untrimmed read's coordinates rather than the trimmed insert's.
+
+``TestScrnaWriterLayout`` covers ``layout``, the description of the barcodes record that
+downstream tools read the cell barcode and UMI offsets from.
 """
 
 import io
 from functools import cached_property
 from inspect import signature
+from itertools import accumulate
 from pathlib import Path
 
 import pytest
@@ -89,6 +93,14 @@ CHEMISTRY = "carmack_custom_seq_1_0"
 # could only ever answer one. hydrop is absent deliberately: it declares no UMI at all,
 # and ScrnaWriter refuses to be constructed against it.
 SHIPPED_CHEMISTRIES = (CHEMISTRY, "carmack_custom_seq_1_0_primd")
+
+# Every registered chemistry this writer can be built against, read from the factory so a
+# chemistry registered later is covered too.
+UMI_CAPABLE_CHEMISTRIES = tuple(
+    name
+    for name in ChemistryFactory.list_chemistries()
+    if ChemistryFactory.get_chemistry(name).supports_umi_extraction()
+)
 
 # Barcode component names in the order the shipped chemistry's read structure
 # declares them - the order barcode_components must reproduce, and the order the
@@ -1008,17 +1020,19 @@ class TestScrnaWriterEmitsCorrectedFixedWidthRecords:
 # names alphabetically yields ("ALPHA", "GAMMA", "ZETA"), not this tuple.
 FABRICATED_BARCODE_NAMES_IN_STRUCTURE_ORDER = ("ZETA", "ALPHA", "GAMMA")
 
+FABRICATED_CHEMISTRY = "fabricated_chemistry_for_scrna_writer"
+
 
 class FabricatedChemistry:
     """Minimal chemistry-shaped test double exposing only what ScrnaWriter calls.
 
-    ``ScrnaWriter.__init__`` and ``write_read`` never touch whitelists, matching
-    tolerances, or any other ``ChemistryBase`` validation machinery: the only
-    surface they actually use is ``umi_component()``, ``umi_right_anchor()``,
-    ``read_structure``, and ``construct_full_barcode()``. This double supplies
-    exactly those four, so a test can drive ``ScrnaWriter`` against a read
-    structure the real, registered chemistries would never produce, without
-    needing whitelist files or ``ChemistryBase.__post_init__`` validation to
+    ``ScrnaWriter.__init__``, ``write_read`` and ``layout`` never touch whitelists,
+    matching tolerances, or any other ``ChemistryBase`` validation machinery: the
+    only surface they actually use is ``name``, ``umi_component()``,
+    ``umi_right_anchor()``, ``read_structure``, and ``construct_full_barcode()``.
+    This double supplies exactly those five, so a test can drive ``ScrnaWriter``
+    against a read structure the real, registered chemistries would never produce,
+    without needing whitelist files or ``ChemistryBase.__post_init__`` validation to
     pass first.
 
     ``construct_full_barcode`` here is a real implementation rather than a
@@ -1029,6 +1043,7 @@ class FabricatedChemistry:
     """
 
     def __init__(self, read_structure: ReadStructure) -> None:
+        self.name = FABRICATED_CHEMISTRY
         self.read_structure = read_structure
 
     def umi_component(self) -> ReadComponent:
@@ -1953,3 +1968,148 @@ class TestScrnaWriterCutIsGivenNotRecomputed:
                 "barcodes_stream",
             ]
         )
+
+
+def build_structured_scrna_read(
+    chemistry: ChemistryBase, values: dict[str, str]
+) -> tuple[ReadAnnotation, str, str]:
+    """Lay out an annotated R1 from any chemistry's read structure, up to its UMI.
+
+    Args:
+        chemistry: The chemistry whose read structure lays the read out.
+        values: Barcode and UMI component name to the value placed and recorded for it.
+
+    Returns:
+        The annotation, the R1 sequence, and a same-length quality string.
+    """
+    annotation = ReadAnnotation(read_id="layout-read")
+    r1_seq = ""
+    for comp in chemistry.read_structure:
+        bases = values.get(comp.name) or comp.sequence or "A" * comp.length
+        if comp.name in values:
+            annotation.set(comp.name, bases)
+            annotation.set(comp.position_key, format_span(len(r1_seq), len(r1_seq) + len(bases)))
+        r1_seq += bases
+        if comp.type is ReadComponentType.UMI:
+            break
+    return annotation, r1_seq, "I" * len(r1_seq)
+
+
+class TestScrnaWriterLayout:
+    """Tests for layout, checked against each chemistry's own read structure."""
+
+    def test_umi_capable_chemistries_covers_the_shipped_ones(self) -> None:
+        """Test that the parametrization below is not silently empty."""
+        assert_that(UMI_CAPABLE_CHEMISTRIES).contains(*SHIPPED_CHEMISTRIES)
+
+    @pytest.mark.parametrize("chemistry_name", UMI_CAPABLE_CHEMISTRIES)
+    def test_layout_tiles_the_record_from_the_read_structure(self, chemistry_name: str) -> None:
+        """Test the cell barcode is every BARCODE width summed, then the UMI, then nothing."""
+        chemistry = ChemistryFactory.get_chemistry(chemistry_name)
+        barcodes = chemistry.read_structure.get_components_by_type(ReadComponentType.BARCODE)
+        umi = chemistry.umi_component()
+        cell_barcode_length = sum(comp.length for comp in barcodes)
+        expected = [*barcodes, umi]
+        starts = accumulate((comp.length for comp in expected), initial=0)
+
+        layout = ScrnaWriter(chemistry).layout()
+
+        assert_that(layout["chemistry"]).is_equal_to(chemistry_name)
+        assert_that(layout["length"]).is_equal_to(cell_barcode_length + umi.length)
+        assert_that(layout["cell_barcode"]).is_equal_to(
+            {"start": 0, "length": cell_barcode_length}
+        )
+        assert_that(layout["umi"]).is_equal_to(
+            {"start": cell_barcode_length, "length": umi.length}
+        )
+        assert_that(layout["components"]).is_equal_to(
+            [
+                {"name": comp.name, "type": comp.type.value, "start": start, "length": comp.length}
+                for comp, start in zip(expected, starts)
+            ]
+        )
+
+    @pytest.mark.parametrize("chemistry_name", UMI_CAPABLE_CHEMISTRIES)
+    def test_layout_is_plain_json_in_a_fixed_key_order(self, chemistry_name: str) -> None:
+        """Test the key order, and that every value is exactly a str or int.
+
+        ``ReadComponentType`` is a ``StrEnum``, so an enum member would still compare equal
+        to ``"BARCODE"``; only an exact-type check catches one leaking into the layout.
+        """
+        layout = ScrnaWriter(ChemistryFactory.get_chemistry(chemistry_name)).layout()
+        spans = [layout["cell_barcode"], layout["umi"]]
+
+        assert_that(list(layout)).is_equal_to(
+            ["chemistry", "length", "cell_barcode", "umi", "components"]
+        )
+        for span in spans:
+            assert_that(list(span)).is_equal_to(["start", "length"])
+        for comp in layout["components"]:
+            assert_that(list(comp)).is_equal_to(["name", "type", "start", "length"])
+        leaves = [layout["chemistry"], layout["length"]]
+        leaves += [value for part in (*spans, *layout["components"]) for value in part.values()]
+        assert_that({type(value) for value in leaves}).is_equal_to({str, int})
+
+    def test_layout_offsets_follow_uneven_widths_with_the_umi_last(self) -> None:
+        """Test offsets over uneven widths, a spacer, and a UMI the read declares first."""
+        components = [
+            ReadComponent(name="UMI", type=ReadComponentType.UMI, length=12),
+            ReadComponent(name="ZETA", type=ReadComponentType.BARCODE, length=6),
+            ReadComponent(name="SPACER", type=ReadComponentType.OTHER, length=5),
+            ReadComponent(name="ALPHA", type=ReadComponentType.BARCODE, length=9),
+            ReadComponent(name="GAMMA", type=ReadComponentType.BARCODE, length=7),
+        ]
+
+        layout = ScrnaWriter(FabricatedChemistry(ReadStructure(components))).layout()
+
+        assert_that(layout).is_equal_to(
+            {
+                "chemistry": FABRICATED_CHEMISTRY,
+                "length": 34,
+                "cell_barcode": {"start": 0, "length": 22},
+                "umi": {"start": 22, "length": 12},
+                "components": [
+                    {"name": "ZETA", "type": "BARCODE", "start": 0, "length": 6},
+                    {"name": "ALPHA", "type": "BARCODE", "start": 6, "length": 9},
+                    {"name": "GAMMA", "type": "BARCODE", "start": 15, "length": 7},
+                    {"name": "UMI", "type": "UMI", "start": 22, "length": 12},
+                ],
+            }
+        )
+
+    @pytest.mark.parametrize("chemistry_name", UMI_CAPABLE_CHEMISTRIES)
+    def test_layout_slices_written_records_back_into_their_values(
+        self, chemistry_name: str
+    ) -> None:
+        """Test that records write_read emits split back into their values at the offsets."""
+        chemistry = ChemistryFactory.get_chemistry(chemistry_name)
+        barcodes = chemistry.read_structure.get_components_by_type(ReadComponentType.BARCODE)
+        umi = chemistry.umi_component()
+        writer = ScrnaWriter(chemistry)
+        layout = writer.layout()
+        cell_barcode, umi_span = layout["cell_barcode"], layout["umi"]
+
+        # A different whitelist entry per component and per read, so a slice landing on the
+        # wrong component cannot match by coincidence.
+        for read_index in range(3):
+            barcode_values = {
+                comp.name: chemistry.whitelists[comp.name][read_index * len(barcodes) + offset]
+                for offset, comp in enumerate(barcodes)
+            }
+            umi_value = ("ACGT" * umi.length)[read_index : read_index + umi.length]
+            values = {**barcode_values, umi.name: umi_value}
+            annotation, r1_seq, r1_qual = build_structured_scrna_read(chemistry, values)
+
+            _, seq, qual = write_barcodes_record(writer, annotation, r1_seq, r1_qual)
+
+            assert_that(seq).is_length(layout["length"])
+            assert_that(qual).is_length(layout["length"])
+            assert_that(
+                seq[cell_barcode["start"] : cell_barcode["start"] + cell_barcode["length"]]
+            ).is_equal_to(chemistry.construct_full_barcode(barcode_values))
+            assert_that(
+                seq[umi_span["start"] : umi_span["start"] + umi_span["length"]]
+            ).is_equal_to(umi_value)
+            for comp in layout["components"]:
+                start = comp["start"]
+                assert_that(seq[start : start + comp["length"]]).is_equal_to(values[comp["name"]])
