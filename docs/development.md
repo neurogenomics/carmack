@@ -36,6 +36,9 @@ three read their configuration from `pyproject.toml`.
 python -m pytest
 ```
 
+For headless runs and macOS use `MPLBACKEND=Agg python -m pytest`; a native plotting
+backend in a forked test process can crash before Python can raise an exception.
+
 Run pytest from the repo root, otherwise an installed copy of `carmack` can shadow the
 source tree and produce different files.
 
@@ -83,6 +86,49 @@ resulting diff as part of the change:
 CARMACK_REGEN_GOLDEN=1 python -m pytest tests/test_golden_outputs.py
 CARMACK_REGEN_GOLDEN=1 python -m pytest tests/test_golden_outputs.py -k golden
 ```
+
+## Correctness before performance
+
+`tests/test_cell_caller_integrity.py` and `tests/test_fastq_validation.py` contain small,
+independently specified adversarial inputs. They check named peak/count correspondence,
+duplicate interval handling, CIGAR gaps, cell-selection edge cases and truncated FASTQ
+records. A self-generated golden file is a change detector, not an independent truth set.
+
+`tests/test_template_identity.py` and `tests/test_known_review_limitations.py` exercise
+whole-pair election, name reuse across cells/read groups, ambiguous primary identities,
+unmapped and non-primary records, and the three previously open review defects. These
+are ordinary passing regressions, not expected failures. The BAM deduplicators validate
+mate identity separately from the assay-specific duplicate-group rule; changing one
+must not silently change the other.
+
+Linux subprocess lifecycle is covered by `tests/test_io_parent_death.py`. To run its
+actual parent-exit probe without installing pytest on a Linux worker:
+
+```sh
+python -m tests.linux_parent_death_probe
+```
+
+It checks that `prctl` affects the child only, direct and streaming children receive
+SIGKILL when their parent exits, custom child callbacks compose correctly, and streamed
+children retain their separate session. A mocked test also covers parent death between
+fork and signal setup. macOS skips only the actual Linux lifecycle test. The POSIX
+wrapper uses a minimal `preexec_fn` for Linux `prctl`; callers must observe Python's
+[restrictions on pre-exec callbacks in threaded programs](https://docs.python.org/3.12/library/subprocess.html#subprocess.Popen). Session
+creation uses `start_new_session`, and failed `prctl` setup aborts process creation.
+
+For an optimization, save the input SHA-256, code commit, resolved environment, command,
+worker count, batch size, compression implementation, host and elapsed time. Capture
+peak resident memory and CPU time as well as reads/second. Run repeated isolated trials
+against a fixed correctness oracle before accepting a speedup. Separate cold startup
+from steady throughput and check 1, 2, 4, 8 and 16 workers; compressor threads are
+additional to the worker pool. Test multiple input sizes and error/target frequencies,
+since exact matches and fallback alignments exercise very different work.
+
+Useful independent checks include per-read barcode/UMI/target truth, pair conservation,
+deduplication winner identity, and named matrix entries. For biological validation use
+held-out libraries with external labels or orthogonal measurements; synthetic fixtures
+and matching previous output cannot establish biological accuracy. Preserve the current
+goldens unless an independently reviewed expected behavior changes.
 
 ## Documentation
 

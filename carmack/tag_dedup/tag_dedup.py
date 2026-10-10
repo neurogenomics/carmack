@@ -6,6 +6,7 @@ from typing import Optional
 
 import pysam
 
+from carmack.bam_templates import PrimaryPairValidator, TemplateIdentity, template_identity
 from carmack.utils import get_prefix, progress_bar
 
 log = logging.getLogger(__name__)
@@ -28,12 +29,74 @@ class TagDedup:
             f" valid barcodes CSV: {bc_valid_csv}, and UMI map: {umi_map}"
         )
 
+    def _find_duplicate_templates(self, bam, bc_dict, umi_dict) -> set[TemplateIdentity]:
+        """Choose a whole template per paired geometry; validate before writing.
+
+        Read group scopes names, not molecule equivalence: duplicate comparisons
+        still span lanes within the same cell. Unmapped/unpaired records are retained
+        without coordinate-based collapse. Non-primary records inherit their primary
+        template's decision and never choose a winner themselves.
+        """
+        with PrimaryPairValidator() as validator:
+            seen_geometry: set[tuple] = set()
+            duplicates: set[TemplateIdentity] = set()
+            unpaired = unmapped = non_primary = missing_barcode = 0
+            for read in bam.fetch(until_eof=True):
+                if read.has_tag("CB"):
+                    raise ValueError("Input BAM file reads already has 'CB' tags.")
+                barcode = bc_dict.get(read.query_name)
+                if barcode is None:
+                    missing_barcode += 1
+                    continue
+                if read.is_secondary or read.is_supplementary:
+                    non_primary += 1
+                    continue
+                if not read.is_paired:
+                    unpaired += 1
+                    continue
+                identity = template_identity(read, barcode)
+                identity = validator.observe(read, identity)
+                if read.is_unmapped or read.mate_is_unmapped:
+                    unmapped += 1
+                    continue
+                if not read.is_read1:
+                    continue
+                # Both ends are required. Sharing only one end is not evidence that two
+                # complete fragments are duplicates; the decision is never made per mate.
+                geometry = (
+                    barcode,
+                    read.reference_id,
+                    read.reference_start,
+                    read.is_reverse,
+                    read.next_reference_id,
+                    read.next_reference_start,
+                    read.mate_is_reverse,
+                    abs(read.template_length),
+                )
+                if umi_dict is not None:
+                    geometry += (umi_dict.get(read.query_name, (None, None))[1],)
+                if geometry in seen_geometry:
+                    duplicates.add(identity)
+                else:
+                    seen_geometry.add(geometry)
+            validated = validator.finish()
+        log.info(
+            f"Legacy dedup validated {validated} complete primary templates; "
+            f"{len(duplicates)} duplicate templates. Record categories: "
+            f"{unpaired} unpaired and {unmapped} unmapped-pair retained without collapse; "
+            f"{non_primary} non-primary follow their template decision; "
+            f"{missing_barcode} missing barcode skipped."
+        )
+        bam.reset()
+        return duplicates
+
     def _tag(
         self,
         untagged_bam: pysam.AlignmentFile,
         tagged_bam: pysam.AlignmentFile,
         bc_dict: dict,
         umi_dict: dict[str, tuple[str, str]] | None = None,
+        duplicate_templates: set[TemplateIdentity] | None = None,
     ) -> None:
         """
         Tag reads in untagged BAM file with barcode, duplicates and write to
@@ -46,18 +109,16 @@ class TagDedup:
         """
         log.info(
             f"Starting to tag reads in BAM file. Total reads to process: "
-            f"{untagged_bam.count()}"
+            f"{untagged_bam.mapped + untagged_bam.unmapped}"
         )
         tag_count: int = 0
 
-        # [(chromosome, start, template_len, barcode[, corrected_umi]), ...]
-        dup_index: list[tuple] = []
-
-        total_reads = untagged_bam.count()
+        duplicate_templates = duplicate_templates or set()
+        total_reads = untagged_bam.mapped + untagged_bam.unmapped
 
         with progress_bar(unit="reads") as pbar:
             task = pbar.add_task("Tagging reads", total=total_reads)
-            for read in untagged_bam.fetch():
+            for read in untagged_bam.fetch(until_eof=True):
                 read_name = read.query_name
 
                 # Check if CB tag already exists
@@ -74,7 +135,7 @@ class TagDedup:
                 # Check if read has a barcode
                 if read_name not in bc_dict:
                     log.warning(
-                        f"Read {read_name} does not have a barcode in barcodes CSV",
+                        f"Read {read_name} does not have a barcode in barcodes CSV"
                         " and will be skipped.",
                     )
                     continue
@@ -102,25 +163,12 @@ class TagDedup:
                     read.set_tag("UR", ur)
                     read.set_tag("UB", ub)
 
-                # Tag duplicates
-                chr = read.reference_name
-                start = read.reference_start
-                seq_len = read.template_length  # Don't want absolute value
-
-                # Without a UMI map the dedup key is unchanged; with one the
-                # corrected UMI (UB) becomes an extra dedup dimension.
-                if umi_dict is None:
-                    dedup_key: tuple = (chr, start, seq_len, barcode)
-                else:
-                    dedup_key = (chr, start, seq_len, barcode, ub)
-
-                if dedup_key in dup_index:
-                    # Only a duplicate if the full dedup key matches
-                    log.debug(f"Duplicate read detected: {read_name}")
-                    read.set_tag("DU", True)
-                else:
-                    read.set_tag("DU", False)
-                    dup_index.append(dedup_key)
+                read.set_tag(
+                    "DU",
+                    int(
+                        read.is_paired and template_identity(read, barcode) in duplicate_templates
+                    ),
+                )
 
                 # Write tagged read to tagged BAM file
                 tagged_bam.write(read)
@@ -140,7 +188,7 @@ class TagDedup:
         """
         log.info(
             f"Starting to deduplicate reads in tagged BAM file. Total "
-            f"reads to process: {tagged_bam.count()}"
+            f"reads to process: {tagged_bam.mapped + tagged_bam.unmapped}"
         )
 
         unique_count: int = 0
@@ -166,8 +214,10 @@ class TagDedup:
             return dup_tag == 1
 
         with progress_bar(unit="reads") as pbar:
-            task = pbar.add_task("Deduplicating reads", total=tagged_bam.count())
-            for read in tagged_bam.fetch():
+            task = pbar.add_task(
+                "Deduplicating reads", total=tagged_bam.mapped + tagged_bam.unmapped
+            )
+            for read in tagged_bam.fetch(until_eof=True):
                 read_dup = get_dup_tag(read)
 
                 if not read_dup:
@@ -179,7 +229,9 @@ class TagDedup:
         # Two reads for one read-pair
         if multiqc_log is not None:
             multiqc_log.writerow(["unique_reads", "duplicate_reads"])
-            multiqc_log.writerow([unique_count, tagged_bam.count() - unique_count])
+            multiqc_log.writerow(
+                [unique_count, tagged_bam.mapped + tagged_bam.unmapped - unique_count]
+            )
 
     def tag_dedup_reads(self, dedup: bool, output_dir: str, prefix: Optional[str] = None) -> None:
         """
@@ -199,7 +251,12 @@ class TagDedup:
         # Read barcodes from CSV
         with open(self.bc_valid_csv, "r") as valid_barcodes:
             csv_reader = csv.reader(valid_barcodes)
-            bc_dict = {line[0].split(" ", 1)[0]: line[1] for line in csv_reader}
+            bc_dict = {}
+            for line in csv_reader:
+                name, barcode = line[0].split(" ", 1)[0], line[1]
+                if name in bc_dict and bc_dict[name] != barcode:
+                    raise ValueError(f"Conflicting barcode assignments for read name {name!r}.")
+                bc_dict[name] = barcode
         log.debug(f"Loaded {len(bc_dict)} valid barcodes.")
 
         # Read the corrected UMI map, if provided. Fixed upstream contract:
@@ -208,7 +265,16 @@ class TagDedup:
         if self.umi_map is not None:
             with open(self.umi_map, "r") as umi_map_file:
                 umi_reader = csv.reader(umi_map_file, delimiter="\t")
-                umi_dict = {row[0]: (row[2], row[3]) for row in umi_reader}
+                umi_dict = {}
+                for row in umi_reader:
+                    name, barcode, ur, ub = row
+                    if name in bc_dict and bc_dict[name] != barcode:
+                        raise ValueError(
+                            f"UMI-map barcode conflicts with barcode CSV for {name!r}."
+                        )
+                    if name in umi_dict and umi_dict[name] != (ur, ub):
+                        raise ValueError(f"Conflicting UMI assignments for read name {name!r}.")
+                    umi_dict[name] = (ur, ub)
             log.debug(f"Loaded {len(umi_dict)} UMI map entries.")
 
         # Tag and write to tagged BAM file
@@ -216,12 +282,13 @@ class TagDedup:
             input_bam = stack.enter_context(
                 pysam.AlignmentFile(self.bam, "rb", index_filename=self.bai)
             )
+            duplicate_templates = self._find_duplicate_templates(input_bam, bc_dict, umi_dict)
             bam_tagged = stack.enter_context(
                 pysam.AlignmentFile(BAM_TAGGED_PATH, "wb", header=input_bam.header)
             )
 
             # Tag
-            self._tag(input_bam, bam_tagged, bc_dict, umi_dict)
+            self._tag(input_bam, bam_tagged, bc_dict, umi_dict, duplicate_templates)
 
         pysam.index(BAM_TAGGED_PATH)
         log.info(

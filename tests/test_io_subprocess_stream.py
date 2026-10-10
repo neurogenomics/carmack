@@ -241,7 +241,11 @@ class TestSubprocessStreamReadFailure(unittest.TestCase):
         """Test abandoning a truncated read stream is not reported either"""
         filename = os.path.join(tmp_path, "truncated.gz")
         healthy = gzip_bytes(SMALL_READ_TEXT)
-        Path(filename).write_bytes(healthy[: int(len(healthy) * TRUNCATION_FRACTION)])
+        # BSD gzip can withhold all output from a short damaged member; in that case
+        # reading five lines actually reaches EOF and should report the failure.
+        # A complete first member guarantees readable lines on BSD and GNU gzip,
+        # while the truncated second member still makes the child exit nonzero.
+        Path(filename).write_bytes(healthy + healthy[: int(len(healthy) * TRUNCATION_FRACTION)])
 
         stream = SubprocessStream(["gzip", "-c", "-d", filename], mode="r")
         lines = read_lines(stream, limit=EARLY_CLOSE_LINES)

@@ -56,7 +56,13 @@ class PeakBarcodeMatrix:
         """
         self.peaks = self.check_elements(peak_names)
         self.barcodes = self.check_elements(barcodes)
-        self.matrix = lil_matrix((len(peak_names), len(barcodes)), dtype=int)
+        if len(set(self.peaks)) != len(self.peaks):
+            raise ValueError("Duplicate peak names would merge distinct matrix rows.")
+        if len(set(self.barcodes)) != len(self.barcodes):
+            raise ValueError("Duplicate barcodes would merge distinct matrix columns.")
+        self._peak_indices = {peak: i for i, peak in enumerate(self.peaks)}
+        self._barcode_indices = {barcode: i for i, barcode in enumerate(self.barcodes)}
+        self.matrix = lil_matrix((len(self.peaks), len(self.barcodes)), dtype=int)
         log.debug(f"Peak-barcode matrix initialised with shape: {self.matrix.shape} (lil_matrix)")
 
     def check_elements(self, iter: Iterable) -> Tuple[str]:
@@ -68,23 +74,24 @@ class PeakBarcodeMatrix:
         Tuple[str]
             Sorted tuple of elements as strings.
         """
-        if not all(isinstance(element, str) for element in iter):
+        elements = tuple(iter)
+        if not all(isinstance(element, str) for element in elements):
             raise TypeError("All elements should be of type str.")
 
-        return tuple(sorted(iter))
+        return tuple(sorted(elements))
 
     def get_index(self, peak_name, barcode) -> Tuple[int, int]:
         """
         Get the matrix index for the given peak and barcode.
         """
-        if peak_name not in self.peaks:
+        if peak_name not in self._peak_indices:
             raise ValueError(f"Peak name '{peak_name}' not found in peak list.")
-        if barcode not in self.barcodes:
+        if barcode not in self._barcode_indices:
             raise ValueError(f"Barcode '{barcode}' not found in barcode list.")
 
         # Get index of peak and barcode
-        peak_idx = self.peaks.index(peak_name)
-        barcode_idx = self.barcodes.index(barcode)
+        peak_idx = self._peak_indices[peak_name]
+        barcode_idx = self._barcode_indices[barcode]
 
         return peak_idx, barcode_idx
 

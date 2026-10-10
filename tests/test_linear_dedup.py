@@ -68,6 +68,7 @@ import pysam
 import pytest
 from assertpy import assert_that
 
+from carmack.bam_templates import template_identity
 from carmack.linear_dedup.linear_dedup import LinearDedup
 from carmack.linear_dedup.linear_dedup_reporting import LinearDedupStats
 from carmack.mqc_report import CARMACK_PARENT_ID, CARMACK_PARENT_NAME
@@ -908,6 +909,8 @@ def make_pair(
         return segment
 
     r1 = build_segment(True, r1_pos, r1_reverse, r2_pos, r2_reverse, r1_tags)
+    if r2_tags is None:
+        r2_tags = {key: value for key, value in (r1_tags or {}).items() if key != "AS"}
     r2 = build_segment(False, r2_pos, r2_reverse, r1_pos, r1_reverse, r2_tags)
     return r1, r2
 
@@ -1005,27 +1008,49 @@ class TestFindBestReads:
         ).is_true()
 
     def test_scenario_a_higher_as_wins(self, winners):
-        assert_that(winners).described_as("winners").contains("dup_high_as")
-        assert_that(winners).described_as("winners").does_not_contain("dup_low_as")
+        assert_that({winner.query_name for winner in winners}).described_as("winners").contains(
+            "dup_high_as"
+        )
+        assert_that({winner.query_name for winner in winners}).described_as(
+            "winners"
+        ).does_not_contain("dup_low_as")
 
     def test_scenario_b_different_cell_same_position_both_survive(self, winners):
-        assert_that(winners).described_as("winners").contains("diffcell_A")
-        assert_that(winners).described_as("winners").contains("diffcell_B")
+        assert_that({winner.query_name for winner in winners}).described_as("winners").contains(
+            "diffcell_A"
+        )
+        assert_that({winner.query_name for winner in winners}).described_as("winners").contains(
+            "diffcell_B"
+        )
 
     def test_scenario_c_same_cell_different_chromosome_both_survive(self, winners):
-        assert_that(winners).described_as("winners").contains("diffchrom_1")
-        assert_that(winners).described_as("winners").contains("diffchrom_2")
+        assert_that({winner.query_name for winner in winners}).described_as("winners").contains(
+            "diffchrom_1"
+        )
+        assert_that({winner.query_name for winner in winners}).described_as("winners").contains(
+            "diffchrom_2"
+        )
 
     def test_scenario_d_reverse_strand_collapse_keeps_only_higher_as_winner(self, winners):
-        assert_that(winners).described_as("winners").contains("revdup_base")
-        assert_that(winners).described_as("winners").does_not_contain("revdup_shift")
+        assert_that({winner.query_name for winner in winners}).described_as("winners").contains(
+            "revdup_base"
+        )
+        assert_that({winner.query_name for winner in winners}).described_as(
+            "winners"
+        ).does_not_contain("revdup_shift")
 
     def test_scenario_e_missing_as_loses_to_scored_competitor(self, winners):
-        assert_that(winners).described_as("winners").contains("scored_winner")
-        assert_that(winners).described_as("winners").does_not_contain("noas_loser")
+        assert_that({winner.query_name for winner in winners}).described_as("winners").contains(
+            "scored_winner"
+        )
+        assert_that({winner.query_name for winner in winners}).described_as(
+            "winners"
+        ).does_not_contain("noas_loser")
 
     def test_scenario_f_missing_as_with_no_competitor_survives_alone(self, winners):
-        assert_that(winners).described_as("winners").contains("noas_alone")
+        assert_that({winner.query_name for winner in winners}).described_as("winners").contains(
+            "noas_alone"
+        )
 
     def test_scenario_h_secondary_and_supplementary_are_counted_as_non_primary(
         self, winners, stats
@@ -1039,12 +1064,20 @@ class TestFindBestReads:
         # dup_low_as's AS=50. If pass 1 folded it into scoring as an eligible competitor, the
         # weaker of the two real contenders (dup_low_as) could still win on some other basis;
         # instead the true primary pair alone decides the group, exactly as in scenario (a).
-        assert_that(winners).described_as("winners").contains("dup_high_as")
-        assert_that(winners).described_as("winners").does_not_contain("dup_low_as")
+        assert_that({winner.query_name for winner in winners}).described_as("winners").contains(
+            "dup_high_as"
+        )
+        assert_that({winner.query_name for winner in winners}).described_as(
+            "winners"
+        ).does_not_contain("dup_low_as")
 
     def test_scenario_i_unmapped_r1_and_mapped_r1_with_unmapped_mate_are_excluded(self, winners):
-        assert_that(winners).described_as("winners").does_not_contain("unmapped_r1_mapped_mate")
-        assert_that(winners).described_as("winners").does_not_contain("mapped_r1_unmapped_mate")
+        assert_that({winner.query_name for winner in winners}).described_as(
+            "winners"
+        ).does_not_contain("unmapped_r1_mapped_mate")
+        assert_that({winner.query_name for winner in winners}).described_as(
+            "winners"
+        ).does_not_contain("mapped_r1_unmapped_mate")
 
     def test_scenario_i_unmapped_pairs_are_counted_never_raise(self, stats):
         assert_that(stats.skipped_unmapped).described_as(
@@ -1131,7 +1164,9 @@ class TestFindBestReadsUnpaired:
         with pysam.AlignmentFile(bam_path, "rb", index_filename=bai_path) as bam:
             winners, stats = engine.find_best_reads(bam)
 
-        assert_that(winners).described_as("unpaired winners").does_not_contain("unpaired_read")
+        assert_that({winner.query_name for winner in winners}).described_as(
+            "unpaired winners"
+        ).does_not_contain("unpaired_read")
         assert_that(stats.skipped_unpaired).described_as("skipped_unpaired").is_equal_to(1)
         assert_that(stats.total_pairs).described_as("total_pairs").is_equal_to(1)
 
@@ -1195,8 +1230,12 @@ class TestFindBestReadsFullyUnmappedPair:
             "skipped_unmapped (the fully-unmapped pair's R1)"
         ).is_equal_to(1)
         assert_that(stats.eligible_pairs).described_as("eligible_pairs").is_equal_to(1)
-        assert_that(winners).described_as("winners").contains("anchor")
-        assert_that(winners).described_as("winners").does_not_contain("fully_unmapped")
+        assert_that({winner.query_name for winner in winners}).described_as("winners").contains(
+            "anchor"
+        )
+        assert_that({winner.query_name for winner in winners}).described_as(
+            "winners"
+        ).does_not_contain("fully_unmapped")
 
 
 class TestFindBestReadsTieBreak:
@@ -1236,8 +1275,12 @@ class TestFindBestReadsTieBreak:
         with pysam.AlignmentFile(bam_path, "rb", index_filename=bai_path) as bam:
             winners, _ = engine.find_best_reads(bam)
 
-        assert_that(winners).described_as("tie winners").contains("tie_first")
-        assert_that(winners).described_as("tie winners").does_not_contain("tie_second")
+        assert_that({winner.query_name for winner in winners}).described_as(
+            "tie winners"
+        ).contains("tie_first")
+        assert_that({winner.query_name for winner in winners}).described_as(
+            "tie winners"
+        ).does_not_contain("tie_second")
 
 
 MULTI_CONTIG_REFERENCES = {"chr1": 5000, "chr2": 5000, "chr3": 5000}
@@ -1350,9 +1393,9 @@ class TestFindBestReadsMultiContigPartitioning:
         with pysam.AlignmentFile(bam_path, "rb", index_filename=bai_path) as bam:
             winners, stats = engine.find_best_reads(bam)
 
-        assert_that(winners).described_as("multi-contig winners").is_equal_to(
-            {"chr1_high", "chr2_alone", "chr3_cell_c", "chr3_cell_d"}
-        )
+        assert_that({winner.query_name for winner in winners}).described_as(
+            "multi-contig winners"
+        ).is_equal_to({"chr1_high", "chr2_alone", "chr3_cell_c", "chr3_cell_d"})
         assert_that(stats.pairs_kept_by_chromosome).described_as(
             "pairs_kept_by_chromosome must not leak across contigs"
         ).is_equal_to({"chr1": 1, "chr2": 1, "chr3": 2})
@@ -1421,8 +1464,12 @@ class TestLinearDedupCustomBarcodeTag:
         with pysam.AlignmentFile(bam_path, "rb", index_filename=bai_path) as bam:
             winners, _ = engine.find_best_reads(bam)
 
-        assert_that(winners).described_as("BC-grouped winners").contains("bc_dup_high")
-        assert_that(winners).described_as("BC-grouped winners").does_not_contain("bc_dup_low")
+        assert_that({winner.query_name for winner in winners}).described_as(
+            "BC-grouped winners"
+        ).contains("bc_dup_high")
+        assert_that({winner.query_name for winner in winners}).described_as(
+            "BC-grouped winners"
+        ).does_not_contain("bc_dup_low")
 
     def test_find_best_reads_raises_when_primary_r1_missing_the_configured_tag(
         self, tmp_path: Path
@@ -1583,7 +1630,7 @@ class TestWriteDeduplicatedReads:
         # Guards every test below against silent fixture/engine drift: if find_best_reads ever
         # resolved a different winner set, the assertions that follow would be exercising the
         # wrong QNAMEs without warning.
-        assert_that(winners).described_as(
+        assert_that({winner.query_name for winner in winners}).described_as(
             "find_best_reads winners over the main fixture"
         ).is_equal_to(set(WINNER_QNAMES))
 
@@ -1811,7 +1858,7 @@ class TestLinearDedupOutputOrderMatchesFilteredInput:
                 for read in input_bam.fetch(until_eof=True)
                 if not read.is_secondary
                 and not read.is_supplementary
-                and read.query_name in winners
+                and template_identity(read) in winners
             ]
 
         assert_that(len(output_records)).described_as(

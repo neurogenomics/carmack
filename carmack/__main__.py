@@ -347,8 +347,8 @@ def call_cells(bed, bam, bai, force_n, min_overlap, visualise, output_dir, prefi
 
     if visualise:
         plot = cell_caller.make_plot(force_n=force_n)
-        prefix = f"{prefix}_" if prefix else ""
-        plot.savefig(os.path.join(output_dir, f"{prefix}barcode_matrix.png"))
+        plot_prefix = f"{prefix}_" if prefix else ""
+        plot.savefig(os.path.join(output_dir, f"{plot_prefix}barcode_matrix.png"))
 
     cell_caller.export(output_dir, prefix, force_n)
 

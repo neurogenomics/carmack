@@ -2,6 +2,13 @@
 
 Start with the top-level [`README.md`](../README.md) for installation and CLI usage.
 
+## Running an analysis
+
+- [Read processing walkthrough](read-processing.md): chemistry selection, executable
+  stage commands, input/output contracts, and interpretation limits.
+- [Cell-calling contract](cell-calling.md): alignment counts, peak identity, export
+  ordering, and the limits of the knee heuristic.
+
 ## Contributing
 
 - [Development](development.md): setup, git hooks, code style, running the tests, and the

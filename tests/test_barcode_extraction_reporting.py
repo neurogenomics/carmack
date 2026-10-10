@@ -860,6 +860,33 @@ class TestExtractionStatsMqcReporting:
 
         assert_that(list(payload["data"].keys())).is_equal_to([self.SAMPLE_PREFIX])
 
+    def test_component_ambiguity_is_an_event_rate_not_a_distinct_read_percentage(self):
+        stats = ExtractionStats(
+            overall=OverallStats(total_reads=1, perfect=0, corrok=0, fail=1, top_10_barcodes=[]),
+            per_barcode=[
+                PerBarcodeStats(
+                    bc_name=name,
+                    method=MatchMethod.KMERMATCH,
+                    attempts=1,
+                    success=0,
+                    fail=1,
+                    edit_distance_dist=None,
+                    reads_w_ambiguous_match=1,
+                    spacer_present=0,
+                )
+                for name in ("BC3", "BC2", "BC1")
+            ],
+            bc_names=["BC3", "BC2", "BC1"],
+        )
+        payload = stats.to_mqc_general_stats(self.SAMPLE_PREFIX)
+        assert payload["data"][self.SAMPLE_PREFIX]["pct_ambiguous"] == 300
+        column = next(
+            item["pct_ambiguous"] for item in payload["pconfig"] if "pct_ambiguous" in item
+        )
+        assert column["title"] == "Ambiguity events /100 reads"
+        assert column["suffix"] == " /100 reads"
+        assert "max" not in column
+
     def test_to_mqc_general_stats_attributes_its_columns_with_a_namespace(
         self, sample_extraction_stats: ExtractionStats
     ) -> None:

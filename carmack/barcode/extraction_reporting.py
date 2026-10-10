@@ -150,8 +150,8 @@ class ExtractionStats:
             prefix: Sample identifier used to key the payload's ``data`` section.
 
         Returns:
-            MultiQC custom-content payload with a single row of headline percentages
-            (perfect, corrected, failed, ambiguous) for this sample. ``namespace`` is
+            MultiQC payload with read percentages (perfect, corrected, failed) and
+            component-ambiguity events per 100 reads for this sample. ``namespace`` is
             what attributes those columns to Carmack: the custom-content parser
             branches on the generalstats plot type and returns before it reads
             ``parent_id``, so the parent keys that nest this stage's chart sections are
@@ -206,11 +206,10 @@ class ExtractionStats:
                 },
                 {
                     "pct_ambiguous": {
-                        "title": "% Ambiguous",
-                        "description": "Percentage of reads with at least one ambiguous (tied) barcode match.",
+                        "title": "Ambiguity events /100 reads",
+                        "description": "Ambiguous barcode-component events per 100 input reads. A read can contribute multiple components; this is not the percentage of distinct ambiguous reads.",
                         "min": 0,
-                        "max": 100,
-                        "suffix": "%",
+                        "suffix": " /100 reads",
                         "format": "{:,.2f}",
                         "scale": "YlOrRd",
                     }
