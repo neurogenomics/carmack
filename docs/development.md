@@ -36,6 +36,9 @@ three read their configuration from `pyproject.toml`.
 python -m pytest
 ```
 
+For headless runs and macOS use `MPLBACKEND=Agg python -m pytest`; a native plotting
+backend in a forked test process can crash before Python can raise an exception.
+
 Run pytest from the repo root, otherwise an installed copy of `carmack` can shadow the
 source tree and produce different files.
 
@@ -83,6 +86,27 @@ resulting diff as part of the change:
 CARMACK_REGEN_GOLDEN=1 python -m pytest tests/test_golden_outputs.py
 CARMACK_REGEN_GOLDEN=1 python -m pytest tests/test_golden_outputs.py -k golden
 ```
+
+## Correctness before performance
+
+`tests/test_cell_caller_integrity.py` and `tests/test_fastq_validation.py` contain small,
+independently specified adversarial inputs. They check named peak/count correspondence,
+duplicate interval handling, CIGAR gaps, cell-selection edge cases and truncated FASTQ
+records. A self-generated golden file is a change detector, not an independent truth set.
+
+For an optimization, save the input SHA-256, code commit, resolved environment, command,
+worker count, batch size, compression implementation, host and elapsed time. Capture
+peak resident memory and CPU time as well as reads/second. Run repeated isolated trials
+against a fixed correctness oracle before accepting a speedup. Separate cold startup
+from steady throughput and check 1, 2, 4, 8 and 16 workers; compressor threads are
+additional to the worker pool. Test multiple input sizes and error/target frequencies,
+since exact matches and fallback alignments exercise very different work.
+
+Useful independent checks include per-read barcode/UMI/target truth, pair conservation,
+deduplication winner identity, and named matrix entries. For biological validation use
+held-out libraries with external labels or orthogonal measurements; synthetic fixtures
+and matching previous output cannot establish biological accuracy. Preserve the current
+goldens unless an independently reviewed expected behavior changes.
 
 ## Documentation
 
