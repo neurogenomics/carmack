@@ -298,6 +298,7 @@ class TestCli(unittest.TestCase):
         self.assertEqual(result.exit_code, 0)
         mock_cell_caller.return_value.make_plot.assert_called_once_with(force_n=None)
         mock_cell_caller.return_value.make_plot.return_value.savefig.assert_called_once()
+        mock_cell_caller.return_value.export.assert_called_once_with(".", "test", None)
 
     @mock.patch("carmack.__main__.CellCaller", autospec=True)
     def test_cli_command_call_cells_with_force_n(self, mock_cell_caller):

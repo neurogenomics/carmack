@@ -28,6 +28,7 @@ class CellCaller:
         self.bed_path = bed
 
         self.matrix = None  # Later initialised as PeakBarcodeMatrix
+        self.peaks_by_name = {}
 
         log.debug(f"CellCaller object created with BAM: {bam}, BAI: {bai}, and BED: {bed}")
 
@@ -53,7 +54,8 @@ class CellCaller:
         end = peak["end"]
 
         for overlap in bam.fetch(chrom, start, end):
-            overlap_bases = min(end, overlap.reference_end) - max(start, overlap.reference_start)
+            # Count aligned query bases, excluding deletions and skipped reference regions.
+            overlap_bases = overlap.get_overlap(start, end) or 0
             if overlap_bases >= min_overlap:
                 yield overlap.get_tag("CB")
 
@@ -81,15 +83,17 @@ class CellCaller:
                 seen_entries.add(key)
                 peaks.append(entry)
         peaks = tuple(peaks)
-        barcodes = set(
-            [
-                read.get_tag("CB")
-                for read in pysam.AlignmentFile(self.bam_path, "rb", index_filename=self.bai_path)
-            ]
-        )
-        self.matrix = PeakBarcodeMatrix(
-            peak_names=[peak["name"] for peak in peaks], barcodes=barcodes, force=force
-        )
+        peak_names = [peak["name"] for peak in peaks]
+        if len(set(peak_names)) != len(peak_names):
+            raise ValueError(
+                "Duplicate peak names identify different intervals. Assign a unique BED "
+                "name to each interval before calling cells."
+            )
+        with pysam.AlignmentFile(self.bam_path, "rb", index_filename=self.bai_path) as bam:
+            barcodes = {read.get_tag("CB") for read in bam}
+        self.matrix = PeakBarcodeMatrix(peak_names=peak_names, barcodes=barcodes, force=force)
+        # Preserve exactly the intervals counted, even if the source BED changes before export.
+        self.peaks_by_name = {peak["name"]: peak for peak in peaks}
 
         # Compute matrix
         with pysam.AlignmentFile(self.bam_path, "rb", index_filename=self.bai_path) as bam:
@@ -114,6 +118,11 @@ class CellCaller:
             )
 
         barcode_sums = sorted(self.matrix.sum_barcodes(), reverse=True)
+        if len(barcode_sums) < 2 or barcode_sums[0] == barcode_sums[-1]:
+            raise ValueError(
+                "No knee can be determined from an empty, singleton or flat barcode-rank "
+                "curve. Inspect the counts and supply force_n explicitly (0 selects all)."
+            )
         ranks = list(range(1, len(barcode_sums) + 1))
 
         knee_locator = KneeLocator(
@@ -121,9 +130,14 @@ class CellCaller:
         )
         knee_point_x = knee_locator.knee
         knee_point_y = knee_locator.knee_y
+        if knee_point_x is None or knee_point_y is None:
+            raise ValueError(
+                "No knee was detected in the barcode-rank curve. Inspect the counts and "
+                "supply force_n explicitly (0 selects all)."
+            )
 
         log.debug(f"Knee point x (n_cells): {knee_point_x}")
-        log.debug(f"Knee point y (minimum fragments per barcode): {knee_point_y}")
+        log.debug(f"Knee point y (minimum alignment overlaps per barcode): {knee_point_y}")
 
         return knee_point_x, knee_point_y
 
@@ -161,6 +175,8 @@ class CellCaller:
         log.debug("Creating barcode rank plot...")
 
         barcode_sums = sorted(self.matrix.sum_barcodes(), reverse=True)
+        if not barcode_sums:
+            raise ValueError("Cannot plot an empty barcode-rank curve.")
         ranks = list(range(1, len(barcode_sums) + 1))
 
         if force_n is not None:
@@ -200,7 +216,7 @@ class CellCaller:
             ax.text(
                 x=0.96,
                 y=thresh_y + 1,
-                s=f"{thresh_y} fragments",
+                s=f"{thresh_y} alignment overlaps",
                 transform=ax.get_yaxis_transform(),
                 ha="right",
                 va="bottom",
@@ -222,7 +238,7 @@ class CellCaller:
         ax.legend(loc="upper right")
         ax.grid(True, which="both", ls="-", alpha=0.2)
         ax.set_xlabel("Barcodes")
-        ax.set_ylabel("Fragments overlapping peaks")
+        ax.set_ylabel("Alignment overlaps with peaks")
         ax.set_title("Barcode Rank Plot")
         ax.set_xlim(left=1)
         fig.tight_layout()
@@ -267,10 +283,10 @@ class CellCaller:
         # Filter barcodes
         barcode_with_counts = zip(self.matrix.barcodes, self.matrix.sum_barcodes())
         selected_barcodes = sorted(barcode_with_counts, key=lambda x: x[1], reverse=True)[:n]
-        min_fragments = min([count for _, count in selected_barcodes])  # Logging
+        min_fragments = min((count for _, count in selected_barcodes), default=0)  # Logging
         selected_barcodes = [barcode for barcode, _ in selected_barcodes]
 
-        log.debug(f"Minimum fragments per barcode in selected cells: {min_fragments}")
+        log.debug(f"Minimum alignment overlaps per barcode in selected cells: {min_fragments}")
 
         # Filter peaks
         # Only return peaks that have at least one overlap with the selected barcodes, reduces size
@@ -303,14 +319,12 @@ class CellCaller:
         log.info(f"Exported barcodes to {BARCODES_TSV_PATH}")
 
         # Export peaks
-        bed = BedFile(self.bed_path)
-        all_peaks = tuple(entry for entry in bed.open_read_iterator())
-
         with open(PEAKS_BED_PATH, "w") as f:
             writer = csv.writer(f, delimiter="\t")
-            for peak in all_peaks:
-                if peak["name"] in selected_peaks:
-                    writer.writerow([peak["chrom"], peak["start"], peak["end"]])
+            # Matrix rows follow self.matrix.peaks, which is sorted by name, not BED order.
+            for peak_name in selected_peaks:
+                peak = self.peaks_by_name[peak_name]
+                writer.writerow([peak["chrom"], peak["start"], peak["end"]])
 
         log.info(f"Exported peaks to {PEAKS_BED_PATH}")
 
