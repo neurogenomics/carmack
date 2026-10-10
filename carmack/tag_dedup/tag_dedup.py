@@ -51,7 +51,7 @@ class TagDedup:
         tag_count: int = 0
 
         # [(chromosome, start, template_len, barcode[, corrected_umi]), ...]
-        dup_index: list[tuple] = []
+        dup_index: set[tuple] = set()
 
         total_reads = untagged_bam.count()
 
@@ -74,7 +74,7 @@ class TagDedup:
                 # Check if read has a barcode
                 if read_name not in bc_dict:
                     log.warning(
-                        f"Read {read_name} does not have a barcode in barcodes CSV",
+                        f"Read {read_name} does not have a barcode in barcodes CSV"
                         " and will be skipped.",
                     )
                     continue
@@ -120,7 +120,7 @@ class TagDedup:
                     read.set_tag("DU", True)
                 else:
                     read.set_tag("DU", False)
-                    dup_index.append(dedup_key)
+                    dup_index.add(dedup_key)
 
                 # Write tagged read to tagged BAM file
                 tagged_bam.write(read)
