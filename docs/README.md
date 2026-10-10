@@ -13,6 +13,8 @@ Start with the top-level [`README.md`](../README.md) for installation and CLI us
 
 - [Development](development.md): setup, git hooks, code style, running the tests, and the
   golden output baseline.
+- [Barcode distance validation](benchmarks/barcode-distance-2026-10.md): exact-output
+  checks, controlled subset timings and the limits of those measurements.
 
 ## Outputs
 

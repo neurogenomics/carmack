@@ -57,37 +57,41 @@ def edit_distance(seq1, seq2, n_char="N", n_matches_any=True):
     >>> edit_distance("kitten", "sitting")
     3
     """
-    m, n = len(seq1), len(seq2)
-
-    # Create a matrix to store distances
-    dp = [[0] * (n + 1) for _ in range(m + 1)]
-
-    # Initialize first row and column
-    for i in range(m + 1):
-        dp[i][0] = i
-    for j in range(n + 1):
-        dp[0][j] = j
-
-    # Fill the matrix
-    for i in range(1, m + 1):
-        for j in range(1, n + 1):
-            # Determine substitution cost
-            if seq1[i - 1] == seq2[j - 1]:
-                substitution_cost = 0
-            elif n_matches_any and (seq1[i - 1] == n_char or seq2[j - 1] == n_char):
-                # If either character is N and n_matches_any is True, no penalty
-                substitution_cost = 0
-            else:
-                substitution_cost = 1
-
-            # Calculate minimum cost
-            dp[i][j] = min(
-                dp[i - 1][j] + 1,  # Deletion
-                dp[i][j - 1] + 1,  # Insertion
-                dp[i - 1][j - 1] + substitution_cost,  # Substitution
-            )
-
-    return dp[m][n]
+    # Myers' bit-vector recurrence computes the same global unit-cost distance.
+    # Equality masks include the declared wildcard in either sequence. Python's
+    # arbitrary-width integers avoid a machine-word length limit.
+    # https://doi.org/10.1145/316542.316550
+    if not seq1:
+        return len(seq2)
+    if not seq2:
+        return len(seq1)
+    # Symmetric substitution rule permits the shorter pattern/mask.
+    if len(seq1) > len(seq2):
+        seq1, seq2 = seq2, seq1
+    length = len(seq1)
+    all_bits = (1 << length) - 1
+    high_bit = 1 << (length - 1)
+    masks = {}
+    for i, symbol in enumerate(seq1):
+        masks[symbol] = masks.get(symbol, 0) | (1 << i)
+    wildcard = masks.get(n_char, 0) if n_matches_any else 0
+    positive, negative, distance = all_bits, 0, length
+    for symbol in seq2:
+        equality = (
+            all_bits if n_matches_any and symbol == n_char else masks.get(symbol, 0) | wildcard
+        )
+        vertical = equality | negative
+        diagonal = (((equality & positive) + positive) ^ positive) | equality
+        horizontal_positive = negative | ~(diagonal | positive)
+        horizontal_negative = positive & diagonal
+        if horizontal_positive & high_bit:
+            distance += 1
+        elif horizontal_negative & high_bit:
+            distance -= 1
+        horizontal_positive = (horizontal_positive << 1) | 1
+        positive = ((horizontal_negative << 1) | ~(vertical | horizontal_positive)) & all_bits
+        negative = horizontal_positive & vertical
+    return distance
 
 
 def make_barcode_rank_plot(barcode_counts: Mapping[str, int]) -> "Figure":
