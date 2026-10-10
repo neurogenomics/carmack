@@ -63,6 +63,14 @@ unused targets. Read `sample.none.barcodes.json` for barcode/UMI positions inste
 hardcoding them in downstream tools. Positions in annotation tags and the sidecar are
 0-based half-open spans.
 
+Barcode `PERFECT`, `CORROK` and `FAIL` are mutually exclusive read outcomes. Component
+ambiguity is a subset of failures, not a fourth disjoint class. The MultiQC field named
+`pct_ambiguous` is retained for compatibility but is labelled **ambiguity events per
+100 reads**: summing BC1/BC2/BC3 ambiguity can exceed 100 when a read has several ambiguous
+components. Derive a distinct ambiguous-read fraction from `bc_all.txt.gz` by counting
+each read with any component `-AMBIG` once. Target `NONE` currently combines distinct
+unassigned reasons; use `tgidx_stats.txt` for the mutually exclusive aggregate counts.
+
 The scTIP QNAME is `read_id|CB=<barcode>|UR=<umi>`; an aligner preserving QNAME does **not**
 automatically turn those strings into BAM `CB`/`UR` tags. A downstream conversion step
 must do that before tools requiring tags. The scRNA arm emits a corrected barcode plus
@@ -82,14 +90,46 @@ those whitelists requires a protocol/version decision for existing libraries.
 `linear-dedup` groups paired primary R1 alignments by cell barcode, chromosome, strand and
 R1 start (forward) or end (reverse), keeping the highest R1 `AS` score. It is a **one-end
 position rule**, not UMI deduplication or a two-end fragment identity rule. Reads without
-`AS` have lowest priority. Query names must uniquely identify physical templates across
-the input, because the second pass selects both mates by query name. Validate this
-collision model against the assay before interpreting output as molecule counts.
+`AS` have lowest priority; exact ties keep the first R1 encountered. Both primary mates
+must carry the configured cell-barcode tag. Template selection uses **(QNAME, RG, cell
+barcode)**, so a name reused in another cell or read group cannot resurrect a discarded
+pair. An absent RG is its own namespace. RG distinguishes template names; it does not
+split the biological duplicate groups, which still compare lanes within a cell.
+
+Before output is published, every eligible mapped primary template must have exactly
+one R1 and one R2 with reciprocal mate coordinates and strand flags. Missing mates,
+inconsistent cell/RG tags, and multiple primary records in the same identity namespace
+raise an error naming an example and, for incomplete pairs, the number of affected
+identities. Carmack cannot reconstruct physical pairing for genuinely indistinguishable
+reused identifiers and does not guess from record order. Secondary/supplementary,
+unpaired and unmapped-pair records remain excluded from `linear-dedup`. The final output
+reconciles to two records per winning template. Invalid input does not publish a new BAM
+or successful stats report. Validate the one-end collision model against the assay
+before interpreting output as molecule counts.
 
 The older `bam-tag-deduplicate` command consumes a two-column read-ID/barcode CSV, which
 is not the current annotated `bc_valid.txt.gz` format. Its optional UMI map is headerless
-TSV: read ID, barcode, raw UMI, corrected UMI. It marks individual alignment records and
-can retain opposite mates from different duplicate pairs when coordinate ties arrive in
-different orders. Missing UMI-map entries fall back to position-only deduplication.
-Use this command only with an explicitly validated legacy workflow; the faster lookup
-implemented during review does not resolve these scientific limitations.
+TSV: read ID, barcode, raw UMI, corrected UMI. It now validates complete primary pairs
+and elects the first primary R1 for each **cell + ordered pair of reference starts,
+strands and absolute template length**, adding corrected UMI when a map is supplied.
+The resulting DU decision applies to both mates and their secondary/supplementary
+alignments. Sharing only one endpoint is insufficient to discard either mate. This is
+deliberately different from the linear command's one-end/AS rule.
+
+Legacy unpaired records and unmapped pairs are retained without positional collapse;
+fully unmapped records are included in both BAM and record-count accounting. A
+secondary/supplementary record with no primary decision is retained uncollapsed. Records
+absent from the barcode CSV are still skipped and logged. The name-only CSV cannot
+express different barcodes for the same QNAME: conflicting barcode/UMI-map assignments
+are rejected rather than silently overwritten. Missing UMI-map entries retain the
+previous fallback to position-only grouping among entries without a corrected UMI.
+Legacy duplicate stats count alignment records, including unmapped records, not molecules.
+
+Pair validation uses a temporary on-disk SQLite uniqueness index, with an 8 MiB page-cache
+target and at most 100,000 outstanding mates in memory; older unmatched mates spill to
+the same database. Set `TMPDIR` to writable job scratch with sufficient capacity. Its
+disk use grows with eligible template count and is logged at successful validation;
+it is removed on normal completion or a handled error. An abrupt process kill can leave
+scratch behind. This avoids an additional whole-BAM identity set in RAM. The linear winner set still scales with kept templates and its duplicate-group
+accumulator with the largest chromosome. Benchmark peak RSS and scratch use on
+representative full-depth BAMs before changing job memory requests.

@@ -1,5 +1,4 @@
 import logging
-import os
 import subprocess
 import sys
 
@@ -29,7 +28,9 @@ class SubprocessStream(object):
         else:
             raise ValueError("mode %s unsupported" % self.mode)
 
-        kwargs["preexec_fn"] = os.setsid
+        # Let Popen establish the session without replacing the Linux child
+        # parent-death callback (or a caller's explicit child setup).
+        kwargs["start_new_session"] = True
         sys.stdout.flush()
         sub_proc = LogSubprocess()
         self.proc = sub_proc.Popen(*args, **kwargs)

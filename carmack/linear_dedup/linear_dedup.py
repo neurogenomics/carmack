@@ -6,7 +6,7 @@ highest-scoring read pair per group is kept. This is an alternative to
 UMI-based deduplication, for chemistries with no UMI to key on.
 
 This module implements a two-pass design. Pass 1 finds, for every duplicate
-group, the query name of the single best-scoring pair. The ``+`` strand key
+group, the (QNAME, read group, cell) identity of the best-scoring pair. The ``+`` strand key
 tracks the BAM's own coordinate sort order, so those duplicate groups are
 always contiguous -- but the ``-`` strand key does not: two reverse-strand R1
 reads with the same fragment end but different starts can land at different,
@@ -22,15 +22,20 @@ winners one reference contig at a time (using the BAM's index), discarding
 each contig's duplicate-group accumulator before moving to the next, rather
 than holding one accumulator sized to the whole genome. A final scan over the
 reads with no coordinate at all (both mates unmapped) accounts for them in
-the run's stats without ever contributing a winner.
+the run's stats without ever contributing a winner. Complete primary-pair identity
+validation uses bounded-memory temporary SQLite storage, separate from the per-contig
+duplicate-group map and the final winning-template set.
 """
 
 import logging
+import os
 from contextlib import ExitStack
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import pysam
 
+from carmack.bam_templates import PrimaryPairValidator, TemplateIdentity, template_identity
 from carmack.mqc_report import write_mqc_payloads
 from carmack.utils import get_prefix, progress_bar
 
@@ -101,7 +106,9 @@ class LinearDedup:
             return float("-inf")
         return float(read.get_tag("AS"))
 
-    def find_best_reads(self, input_bam: pysam.AlignmentFile) -> tuple[set[str], LinearDedupStats]:
+    def find_best_reads(
+        self, input_bam: pysam.AlignmentFile
+    ) -> tuple[set[TemplateIdentity], LinearDedupStats]:
         """Scan every R1 record once and resolve the single winner per duplicate group.
 
         Reads are scanned one reference contig at a time (via the BAM's own index), then
@@ -115,12 +122,12 @@ class LinearDedup:
             input_bam: An open, coordinate-sorted, indexed BAM.
 
         Returns:
-            A tuple of the winning query names (one per duplicate group, across every
+            A tuple of the winning template identities (one per duplicate group, across every
             contig) and the reconciling :class:`LinearDedupStats` for the whole scan.
 
         Raises:
-            ValueError: If a primary, paired, mapped R1 record carries no
-                barcode tag.
+            ValueError: If an eligible primary record lacks a barcode, or its template
+                identity is ambiguous, incomplete or has inconsistent mate metadata.
         """
         total_pairs = 0
         eligible_pairs = 0
@@ -130,66 +137,89 @@ class LinearDedup:
         reads_missing_as = 0
         eligible_pairs_by_chromosome: dict[str, int] = {}
         pairs_kept_by_chromosome: dict[str, int] = {}
-        winners: set[str] = set()
+        winners: set[TemplateIdentity] = set()
+        with PrimaryPairValidator() as pairs:
 
-        # AlignmentFile.mapped/.unmapped are read straight from the BAM index, so this
-        # avoids the full extra linear scan input_bam.count(until_eof=True) would cost.
-        total_reads = input_bam.mapped + input_bam.unmapped
-        with progress_bar(unit="reads") as pbar:
-            task = pbar.add_task("Deduplicating reads", total=total_reads)
+            # AlignmentFile.mapped/.unmapped are read straight from the BAM index, so this
+            # avoids the full extra linear scan input_bam.count(until_eof=True) would cost.
+            total_reads = input_bam.mapped + input_bam.unmapped
+            with progress_bar(unit="reads") as pbar:
+                task = pbar.add_task("Deduplicating reads", total=total_reads)
 
-            for contig in (*input_bam.references, NO_COORDINATE_REGION):
-                contig_label = "no-coordinate reads" if contig == NO_COORDINATE_REGION else contig
-                best_by_key: dict[tuple[str, str, bool, int], tuple[str, float]] = {}
-                contig_eligible = 0
-
-                for read in input_bam.fetch(contig=contig):
-                    pbar.advance(task)
-
-                    if not read.is_read1:
-                        continue
-                    total_pairs += 1
-
-                    if read.is_secondary or read.is_supplementary:
-                        skipped_non_primary += 1
-                        continue
-                    if not read.is_paired:
-                        skipped_unpaired += 1
-                        continue
-                    if read.is_unmapped or read.mate_is_unmapped:
-                        skipped_unmapped += 1
-                        continue
-                    if not read.has_tag(self.barcode_tag):
-                        raise ValueError(f"Read does not have a barcode tag ({self.barcode_tag}).")
-
-                    eligible_pairs += 1
-                    contig_eligible += 1
-                    chrom = read.reference_name
-                    eligible_pairs_by_chromosome[chrom] = (
-                        eligible_pairs_by_chromosome.get(chrom, 0) + 1
+                for contig in (*input_bam.references, NO_COORDINATE_REGION):
+                    contig_label = (
+                        "no-coordinate reads" if contig == NO_COORDINATE_REGION else contig
                     )
+                    best_by_key: dict[
+                        tuple[str, str, bool, int], tuple[TemplateIdentity, float]
+                    ] = {}
+                    contig_eligible = 0
 
-                    score = self.read_score(read)
-                    if score == float("-inf"):
-                        reads_missing_as += 1
+                    for read in input_bam.fetch(contig=contig):
+                        pbar.advance(task)
 
-                    key = self.fragment_key(read)
-                    current = best_by_key.get(key)
-                    if current is None or score > current[1]:
-                        best_by_key[key] = (read.query_name, score)
+                        if (
+                            read.is_paired
+                            and not read.is_secondary
+                            and not read.is_supplementary
+                            and not read.is_unmapped
+                            and not read.mate_is_unmapped
+                        ):
+                            identity = template_identity(read, barcode_tag=self.barcode_tag)
+                            identity = pairs.observe(read, identity)
 
-                if contig_eligible or best_by_key:
-                    log.info(
-                        f"linear-dedup pass 1: {contig_label} done "
-                        f"({contig_eligible} eligible pairs, {len(best_by_key)} duplicate-group "
-                        "winners)."
-                    )
-                if best_by_key:
-                    pairs_kept_by_chromosome[contig] = len(best_by_key)
-                    winners.update(qname for qname, _ in best_by_key.values())
-                # best_by_key goes out of scope on the next iteration -- this is the whole
-                # point of scanning contig by contig rather than the whole genome at once.
+                        if not read.is_read1:
+                            continue
+                        total_pairs += 1
 
+                        if read.is_secondary or read.is_supplementary:
+                            skipped_non_primary += 1
+                            continue
+                        if not read.is_paired:
+                            skipped_unpaired += 1
+                            continue
+                        if read.is_unmapped or read.mate_is_unmapped:
+                            skipped_unmapped += 1
+                            continue
+                        if not read.has_tag(self.barcode_tag):
+                            raise ValueError(
+                                f"Read does not have a barcode tag ({self.barcode_tag})."
+                            )
+
+                        eligible_pairs += 1
+                        contig_eligible += 1
+                        chrom = read.reference_name
+                        eligible_pairs_by_chromosome[chrom] = (
+                            eligible_pairs_by_chromosome.get(chrom, 0) + 1
+                        )
+
+                        score = self.read_score(read)
+                        if score == float("-inf"):
+                            reads_missing_as += 1
+
+                        key = self.fragment_key(read)
+                        current = best_by_key.get(key)
+                        if current is None or score > current[1]:
+                            best_by_key[key] = (identity, score)
+
+                    if contig_eligible or best_by_key:
+                        log.info(
+                            f"linear-dedup pass 1: {contig_label} done "
+                            f"({contig_eligible} eligible pairs, {len(best_by_key)} duplicate-group "
+                            "winners)."
+                        )
+                    if best_by_key:
+                        pairs_kept_by_chromosome[contig] = len(best_by_key)
+                        winners.update(identity for identity, _ in best_by_key.values())
+                    # best_by_key goes out of scope on the next iteration -- this is the whole
+                    # point of scanning contig by contig rather than the whole genome at once.
+
+            validated = pairs.finish()
+            if validated != eligible_pairs:
+                raise ValueError(
+                    "Primary-pair validation does not reconcile with eligible R1 count."
+                )
+        log.info(f"linear-dedup: validated {validated} complete primary template identities.")
         stats = LinearDedupStats(
             total_pairs=total_pairs,
             eligible_pairs=eligible_pairs,
@@ -206,21 +236,20 @@ class LinearDedup:
         self,
         input_bam: pysam.AlignmentFile,
         output_bam: pysam.AlignmentFile,
-        winners: set[str],
+        winners: set[TemplateIdentity],
     ) -> int:
         """Write both mates of every winning pair, unchanged, to the output BAM.
 
         Every record in ``input_bam`` is examined (both R1 and R2), so a
         winner's mate is written regardless of where it physically sits in
-        the file. A primary record's query name is checked again
-        independently of pass 1, so a secondary or supplementary alignment
-        sharing a winner's query name is still excluded.
+        the file. Primary records are selected by their full template identity, not QNAME alone.
+        Secondary/supplementary, unpaired and unmapped records remain excluded.
 
         Args:
             input_bam: An open, coordinate-sorted, indexed BAM.
             output_bam: An open BAM opened for writing, sharing the input's
                 header.
-            winners: The winning query names resolved by
+            winners: The winning template identities resolved by
                 :meth:`find_best_reads`.
 
         Returns:
@@ -236,7 +265,9 @@ class LinearDedup:
 
                 if read.is_secondary or read.is_supplementary:
                     continue
-                if read.query_name not in winners:
+                if not read.is_paired or read.is_unmapped or read.mate_is_unmapped:
+                    continue
+                if template_identity(read, barcode_tag=self.barcode_tag) not in winners:
                     continue
 
                 # linear_dedup_reads skips re-sorting this output on the assumption that
@@ -255,6 +286,11 @@ class LinearDedup:
                 output_bam.write(read)
                 written += 1
 
+        if written != 2 * len(winners):
+            raise ValueError(
+                f"Output reconciliation failed: {written} records for {len(winners)} "
+                "winning templates; input may have changed between passes."
+            )
         log.info(f"linear-dedup pass 2: wrote {written} records for {len(winners)} winning pairs.")
         return written
 
@@ -278,8 +314,8 @@ class LinearDedup:
             (:meth:`find_best_reads`).
 
         Raises:
-            ValueError: If a primary, paired, mapped R1 record carries no
-                barcode tag.
+            ValueError: If an eligible primary record lacks a barcode, or its template
+                identity is ambiguous, incomplete or has inconsistent mate metadata.
         """
         prefix = prefix or get_prefix(self.bam)
         output_path = Path(output_dir)
@@ -297,16 +333,20 @@ class LinearDedup:
         )
 
         log.info("linear-dedup: starting pass 2 (writing deduplicated output)")
-        with ExitStack() as stack:
-            input_bam = stack.enter_context(
-                pysam.AlignmentFile(self.bam, "rb", index_filename=self.bai)
-            )
-            output_bam = stack.enter_context(
-                pysam.AlignmentFile(str(output_bam_path), "wb", template=input_bam)
-            )
-            self.write_deduplicated_reads(input_bam, output_bam, winners)
-
-        pysam.index(str(output_bam_path))
+        # Validation failures never publish a partial BAM under the final name.
+        with TemporaryDirectory(prefix=".linear-dedup-", dir=output_path) as staging:
+            staged_bam = Path(staging) / "output.bam"
+            with ExitStack() as stack:
+                input_bam = stack.enter_context(
+                    pysam.AlignmentFile(self.bam, "rb", index_filename=self.bai)
+                )
+                output_bam = stack.enter_context(
+                    pysam.AlignmentFile(str(staged_bam), "wb", template=input_bam)
+                )
+                self.write_deduplicated_reads(input_bam, output_bam, winners)
+            pysam.index(str(staged_bam))
+            os.replace(staged_bam, output_bam_path)
+            os.replace(str(staged_bam) + ".bai", str(output_bam_path) + ".bai")
         log.info(f"linear-dedup: wrote indexed output BAM to {output_bam_path}")
 
         stats_path = output_path / f"{prefix}.linear_dedup_stats.txt"

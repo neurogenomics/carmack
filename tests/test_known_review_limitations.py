@@ -1,9 +1,8 @@
-"""Executable open review findings; xfail means unresolved, never biological validation."""
+"""Regressions for the three previously open review findings; synthetic validation only."""
 
 from unittest.mock import MagicMock
 
 import pysam
-import pytest
 
 from carmack.io import log_subprocess
 from carmack.linear_dedup.linear_dedup import LinearDedup
@@ -31,7 +30,6 @@ def write_pairs(path, records):
     pysam.index(str(path))
 
 
-@pytest.mark.xfail(strict=True, reason="Open review: legacy dedup chooses mates independently")
 def test_legacy_dedup_preserves_a_complete_winning_pair(tmp_path):
     bam = tmp_path / "reads.bam"
     write_pairs(bam, [("a", 1, None, 1), ("b", 1, None, 1), ("b", 2, None, 1), ("a", 2, None, 1)])
@@ -43,7 +41,6 @@ def test_legacy_dedup_preserves_a_complete_winning_pair(tmp_path):
     assert records == [("a", True), ("a", False)]
 
 
-@pytest.mark.xfail(strict=True, reason="Open review: linear-dedup requires globally unique QNAMEs")
 def test_linear_dedup_does_not_resurrect_a_loser_with_a_shared_name(tmp_path):
     bam = tmp_path / "reads.bam"
     write_pairs(
@@ -60,11 +57,10 @@ def test_linear_dedup_does_not_resurrect_a_loser_with_a_shared_name(tmp_path):
     stats = LinearDedup(str(bam), str(bam) + ".bai").linear_dedup_reads(str(tmp_path), "out")
     with pysam.AlignmentFile(str(tmp_path / "out.linear_dedup.bam"), "rb") as out:
         records = [(read.query_name, read.get_tag("CB")) for read in out]
-    assert len(records) == 2 * stats.pairs_kept == 4
+    assert len(records) == 2 * stats.pairs_kept() == 4
     assert ("shared", "B") not in records
 
 
-@pytest.mark.xfail(strict=True, reason="Open review: Linux parent-death callback runs in parent")
 def test_linux_subprocess_setup_defers_prctl_until_child(monkeypatch):
     libc = MagicMock()
     libc.prctl.return_value = 0
