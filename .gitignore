@@ -131,3 +131,13 @@ dump
 # distributed package. Kept out of the tree so it cannot be committed or shipped.
 benchmark_pipeline.py
 tests/test_benchmark_pipeline.py
+
+# --- Engineering standards: sequencing data stays out of git (see AGENTS.md) ---
+*.bam
+*.bai
+*.cram
+*.sam
+work/
+results/
+# Small test fixtures stay tracked (keep each under ~1 MB).
+!tests/data/**
